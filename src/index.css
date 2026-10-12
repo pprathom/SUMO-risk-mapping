@@ -1,0 +1,14 @@
+@import url('https://unpkg.com/leaflet@1.9.4/dist/leaflet.css');
+@import "tailwindcss";
+
+@layer base {
+  html, body, #root {
+    @apply h-full w-full m-0 p-0 overflow-hidden bg-[#0F172A];
+  }
+}
+
+.leaflet-container {
+  height: 100% !important;
+  width: 100% !important;
+  background: #0B0F19 !important;
+}

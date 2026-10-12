@@ -1,0 +1,6 @@
+{
+  "name": "SUMO Traffic Safety Viewer",
+  "description": "Visualize road accident risk points on OpenStreetMap from SUMO SSM simulation outputs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
