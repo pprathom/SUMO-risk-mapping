@@ -4,22 +4,22 @@
  */
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { 
-  MapContainer, 
-  TileLayer, 
-  Marker, 
-  Popup, 
-  CircleMarker, 
-  useMap 
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Popup,
+  CircleMarker,
+  useMap
 } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet.heat';
-import { 
-  Upload, 
-  AlertTriangle, 
-  FileText, 
-  Map as MapIcon, 
-  Info, 
+import {
+  Upload,
+  AlertTriangle,
+  FileText,
+  Map as MapIcon,
+  Info,
   ChevronRight,
   Filter,
   Download,
@@ -33,8 +33,12 @@ import {
 import { XMLParser } from 'fast-xml-parser';
 import proj4 from 'proj4';
 import { motion, AnimatePresence } from 'motion/react';
-
-// --- Types ---
+import * as pako from 'pako';
+import AccidentLayer from './components/AccidentLayer';
+import type { Accident } from './components/AccidentLayer';
+import HeatLayer from './components/HeatLayer';
+import HelpModal from './components/HelpModal';
+import { PROVINCES, findNearestProvince } from './data/provinces';
 
 interface SumoLocation {
   netOffset: [number, number];
@@ -45,8 +49,8 @@ interface SumoLocation {
 
 interface ConflictMetric {
   time: number;
-  position: [number, number]; // x, y
-  geoPosition?: [number, number]; // lat, lon
+  position: [number, number];
+  geoPosition?: [number, number];
   type: string;
   value: number;
   speed: number;
@@ -61,17 +65,14 @@ interface Conflict {
   minTTC?: ConflictMetric;
   maxDRAC?: ConflictMetric;
   PET?: ConflictMetric;
-  riskScore: number; // 0 to 1
+  riskScore: number;
 }
 
-// --- Constants & Helpers ---
-
 const RISK_THRESHOLDS = {
-  TTC: 1.5, // Less than 1.5 is High Risk
-  DRAC: 3.5, // More than 3.5 is High Risk
+  TTC: 1.5,
+  DRAC: 3.5,
 };
 
-// Conflict Type Definitions
 const CONFLICT_DESCRIPTIONS: Record<string, { label: string, desc: string }> = {
   "2": { label: "FOLLOWING_FOLLOWER", desc: "ยานพาหนะหลัก (ego) กำลังขับตามยานพาหนะคู่กรณี (foe) sumo.dlr" },
   "3": { label: "FOLLOWING_LEADER", desc: "ยานพาหนะคู่กรณี (foe) กำลังขับตามยานพาหนะหลัก (ego)" },
@@ -82,23 +83,22 @@ const CONFLICT_DESCRIPTIONS: Record<string, { label: string, desc: string }> = {
 };
 
 const isValidCoord = (p: any): p is [number, number] => {
-  return Array.isArray(p) && 
-         p.length === 2 && 
-         typeof p[0] === 'number' && 
-         typeof p[1] === 'number' && 
-         Number.isFinite(p[0]) && 
+  return Array.isArray(p) &&
+         p.length === 2 &&
+         typeof p[0] === 'number' &&
+         typeof p[1] === 'number' &&
+         Number.isFinite(p[0]) &&
          Number.isFinite(p[1]) &&
-         (Math.abs(p[0]) > 0.000001 || Math.abs(p[1]) > 0.000001); // Allow almost zero, but not exactly [0,0] if likely a bug
+         (Math.abs(p[0]) > 0.000001 || Math.abs(p[1]) > 0.000001);
 };
 
 const getRiskColor = (conflict: Conflict) => {
-  if (conflict.minTTC && conflict.minTTC.value < 1.0) return '#ef4444'; // Red
-  if (conflict.minTTC && conflict.minTTC.value < 2.5) return '#f97316'; // Orange
-  if (conflict.maxDRAC && conflict.maxDRAC.value > 3.0) return '#fbbf24'; // Yellow
-  return '#22c55e'; // Green
+  if (conflict.minTTC && conflict.minTTC.value < 1.0) return '#ef4444';
+  if (conflict.minTTC && conflict.minTTC.value < 2.5) return '#f97316';
+  if (conflict.maxDRAC && conflict.maxDRAC.value > 3.0) return '#fbbf24';
+  return '#22c55e';
 };
 
-// Component to recenter map when data changes
 function MapRecenter({ bounds }: { bounds: L.LatLngBounds | null }) {
   const map = useMap();
   useEffect(() => {
@@ -113,7 +113,6 @@ function MapRecenter({ bounds }: { bounds: L.LatLngBounds | null }) {
   return null;
 }
 
-// Component to handle map clicks for calibration
 function MapEvents({ onMapClick, enabled }: { onMapClick: (lat: number, lon: number) => void, enabled: boolean }) {
   const map = useMap();
   useEffect(() => {
@@ -129,21 +128,20 @@ function MapEvents({ onMapClick, enabled }: { onMapClick: (lat: number, lon: num
   return null;
 }
 
-// Map Resize Handler to fix broken tiles
 function MapResizeHandler() {
   const map = useMap();
   useEffect(() => {
     setTimeout(() => {
       map.invalidateSize();
     }, 200);
-    
+
     const resizeObserver = new ResizeObserver(() => {
       map.invalidateSize();
     });
-    
+
     const container = map.getContainer();
     if (container) resizeObserver.observe(container);
-    
+
     return () => resizeObserver.disconnect();
   }, [map]);
   return null;
@@ -175,18 +173,12 @@ function ConflictVisualization({ conflict }: { conflict: Conflict }) {
   const metric = conflict.minTTC;
   if (!metric) return null;
 
-  // Assume ego speed is slightly different or simplified for visual
-  // In real SUMO SSM, metrics are usually reported for the pair.
-  // If we don't have individual speeds in the metric, we can use the value provided.
-  // For visualization, we'll simulate the "encounter"
-  
   const type = metric.type;
-  const speed = metric.speed * 3.6; // Convert m/s to km/hr
+  const speed = metric.speed * 3.6;
   const ttc = metric.value;
 
   return (
     <div className="space-y-4">
-      {/* Speed Visualization */}
       <div className="bg-slate-950/50 rounded-xl p-3 border border-white/5">
         <div className="flex justify-between items-center mb-3">
           <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
@@ -194,10 +186,10 @@ function ConflictVisualization({ conflict }: { conflict: Conflict }) {
           </span>
           <span className="text-[9px] font-mono text-slate-500">at t={metric.time}s</span>
         </div>
-        
+
         <div className="space-y-3">
           <div className="relative h-6 bg-slate-800/50 rounded-full overflow-hidden border border-slate-700/50">
-            <motion.div 
+            <motion.div
               initial={{ width: 0 }}
               animate={{ width: `${Math.min(100, (speed / 120) * 100)}%` }}
               className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 flex items-center px-2"
@@ -205,7 +197,7 @@ function ConflictVisualization({ conflict }: { conflict: Conflict }) {
               <span className="text-[8px] font-black text-white whitespace-nowrap">VEHICLE SPEED: {speed.toFixed(1)} km/hr</span>
             </motion.div>
           </div>
-          
+
           <div className="flex justify-between items-end px-1">
             <div className="flex flex-col">
               <span className="text-[8px] text-slate-500 uppercase font-bold">Severity Index</span>
@@ -234,13 +226,26 @@ export default function App() {
   const [selectedConflict, setSelectedConflict] = useState<Conflict | null>(null);
   const [mapStyle, setMapStyle] = useState<MapStyleKey>('voyager');
   const [displayLimit, setDisplayLimit] = useState<number>(500);
-  
-  // Filtering states
+
   const [typeFilters, setTypeFilters] = useState<string[]>(['2', '3', '6', '7', '10', '11']);
   const [riskFilters, setRiskFilters] = useState<string[]>(['high', 'moderate', 'low']);
-  
+
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [selectedProvince, setSelectedProvince] = useState<number | null>(null);
+  const [startDate, setStartDate] = useState('2025-01-01');
+  const [endDate, setEndDate] = useState('2025-12-31');
+  const [severityId, setSeverityId] = useState(1);
+  const [accidents, setAccidents] = useState<Accident[]>([]);
+  const [showAccidents, setShowAccidents] = useState(false);
+  const [loadingAccidents, setLoadingAccidents] = useState(false);
+  const [accidentError, setAccidentError] = useState<string | null>(null);
+  const [provinceSearch, setProvinceSearch] = useState('');
+  const [accidentLimit, setAccidentLimit] = useState(5000);
+  const [accidentTotal, setAccidentTotal] = useState(0);
+  const [accidentViewMode, setAccidentViewMode] = useState<'points' | 'heat'>('points');
+  const [helpOpen, setHelpOpen] = useState(false);
 
   const getRiskLevel = (conflict: Conflict) => {
     if (conflict.minTTC && conflict.minTTC.value < 1.5) return 'high';
@@ -256,7 +261,6 @@ export default function App() {
         return typeMatch && riskMatch;
       })
       .sort((a, b) => {
-        // Sort by TTC ascending (most dangerous first)
         const valA = a.minTTC?.value ?? 999;
         const valB = b.minTTC?.value ?? 999;
         return valA - valB;
@@ -268,7 +272,7 @@ export default function App() {
     const points = filteredConflicts
       .flatMap(c => [c.minTTC?.geoPosition, c.maxDRAC?.geoPosition, c.PET?.geoPosition])
       .filter(isValidCoord);
-    
+
     if (points.length === 0) return null;
     try {
       const bounds = L.latLngBounds(points);
@@ -278,6 +282,14 @@ export default function App() {
       return null;
     }
   }, [filteredConflicts]);
+
+  const filteredProvinces = useMemo(() => {
+    if (!provinceSearch.trim()) return PROVINCES;
+    const q = provinceSearch.toLowerCase();
+    return PROVINCES.filter(
+      p => p.nameTH.includes(provinceSearch) || p.nameEN.toLowerCase().includes(q)
+    );
+  }, [provinceSearch]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'net' | 'ssm') => {
     const file = e.target.files?.[0];
@@ -306,11 +318,32 @@ export default function App() {
         return obj[key] ?? obj[`@_${key}`];
       };
 
-      // 1. Parse Network File for Location Info
       let parsedLocation: SumoLocation | null = null;
       try {
         if (netFile) {
-          const netText = await netFile.text();
+          let netText: string;
+          if (netFile.name.toLowerCase().endsWith('.gz')) {
+            try {
+              const head = new Uint8Array(await netFile.slice(0, 2).arrayBuffer());
+              const isGzip = head[0] === 0x1f && head[1] === 0x8b;
+              if (!isGzip) {
+                setError("ไฟล์ไม่ใช่ gzip ที่ถูกต้อง (magic bytes ไม่ตรง)");
+                setIsLoading(false);
+                return;
+              }
+              const compressed = new Uint8Array(await netFile.arrayBuffer());
+              const decompressed = pako.ungzip(compressed);
+              netText = new TextDecoder().decode(decompressed);
+            } catch (decompErr) {
+              console.error("Decompression failed:", decompErr);
+              setError(`Decompress ไฟล์ .gz ล้มเหลว: ${decompErr instanceof Error ? decompErr.message : String(decompErr)}`);
+              setIsLoading(false);
+              return;
+            }
+          } else {
+            netText = await netFile.text();
+          }
+          console.log("Network file loaded, length:", netText.length);
           const netData = parser.parse(netText);
           const loc = netData.net?.location || netData.location;
 
@@ -322,21 +355,50 @@ export default function App() {
               projParameter: getAttr(loc, 'projParameter') || "!",
             };
             setSumoLocation(parsedLocation);
+
+            const cb = parsedLocation.convBoundary;
+            const centerX = (cb[0] + cb[2]) / 2;
+            const centerY = (cb[1] + cb[3]) / 2;
+
+            const targetProj = '+proj=longlat +datum=WGS84 +no_defs';
+            let geoX = centerX;
+            let geoY = centerY;
+
+            if (parsedLocation.projParameter && parsedLocation.projParameter !== '!') {
+              try {
+                const adjX = centerX - (parsedLocation.netOffset[0] || 0);
+                const adjY = centerY - (parsedLocation.netOffset[1] || 0);
+                const result = proj4(parsedLocation.projParameter, targetProj, [adjX, adjY]);
+                if (result && Number.isFinite(result[0]) && Number.isFinite(result[1])) {
+                  geoX = result[0];
+                  geoY = result[1];
+                }
+              } catch (e) {
+                console.warn("proj4 conversion failed for reverse-geocode", e);
+              }
+            } else {
+              geoX = centerY;
+              geoY = centerX;
+            }
+
+            if (isValidCoord([geoY, geoX])) {
+              const nearest = findNearestProvince(geoY, geoX);
+              if (nearest) {
+                setSelectedProvince(nearest.code);
+              }
+            }
           }
         }
       } catch (e) {
         console.warn("Failed to parse net.xml", e);
       }
 
-      // 2. Parse SSM Output File
       const ssmText = await ssmFile.text();
       const ssmData = parser.parse(ssmText);
-      
-      // Attempt to find conflicts even if root tag is different
+
       let rawConflicts = ssmData.SSMLog?.conflict || ssmData.conflict || ssmData['ssm-results']?.SSMLog?.conflict;
-      
+
       if (!rawConflicts) {
-        // Search deeper if needed
         const findConflicts = (obj: any): any => {
           if (!obj || typeof obj !== 'object') return null;
           if (obj.conflict) return obj.conflict;
@@ -359,18 +421,17 @@ export default function App() {
         rawConflicts = [rawConflicts];
       }
 
-        // Proj4 setup - Ensure standard longlat output
         const targetProj = '+proj=longlat +datum=WGS84 +no_defs';
-        
+
         const convertCoord = (x: number, y: number): [number, number] | undefined => {
           if (!parsedLocation || !Number.isFinite(x) || !Number.isFinite(y)) return undefined;
 
           const adjustedX = x - (parsedLocation.netOffset[0] || 0);
           const adjustedY = y - (parsedLocation.netOffset[1] || 0);
-          
+
           if (parsedLocation.projParameter === '!' || !parsedLocation.projParameter) {
             if (isValidCoord([y, x])) return [y, x];
-            return undefined; 
+            return undefined;
           }
 
           try {
@@ -388,14 +449,14 @@ export default function App() {
           if (!m) return undefined;
           const val = getAttr(m, 'value');
           if (val === 'NA' || val === undefined) return undefined;
-          
+
           const posStr = getAttr(m, 'position');
           const posRaw = posStr ? posStr.split(',').map(v => {
             const n = Number(v);
             return Number.isFinite(n) ? n : 0;
           }) : [0, 0];
           const pos: [number, number] = [posRaw[0] ?? 0, posRaw[1] ?? 0];
-          
+
           const metricValue = Number(val);
           const metricSpeed = Number(getAttr(m, 'speed'));
 
@@ -434,19 +495,82 @@ export default function App() {
     }
   };
 
+  const fetchAccidents = async (offset = 0, append = false) => {
+    if (!selectedProvince) {
+      setAccidentError("กรุณาเลือกจังหวัด");
+      return;
+    }
+    setLoadingAccidents(true);
+    setAccidentError(null);
+    try {
+      const res = await fetch('/api/accidents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_id: 3,
+          severity_id: severityId,
+          geocode: selectedProvince,
+          start_date: startDate,
+          end_date: endDate,
+          limit: accidentLimit,
+          offset,
+        }),
+      });
+      const text = await res.text();
+      let json;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        throw new Error(`Server returned invalid response (HTTP ${res.status}) — ตรวจสอบว่า backend รันอยู่ที่พอร์ต 3001`);
+      }
+      if (!res.ok || !json.success) {
+        throw new Error(json.error || json.message || 'Failed to fetch accidents');
+      }
+      const items: Accident[] = (json.data || []).filter((a: Accident) =>
+        Array.isArray(a.location) && a.location.length === 2
+      );
+      setAccidentTotal(json.total || 0);
+      setAccidents(prev => append ? [...prev, ...items] : items);
+      setShowAccidents(true);
+    } catch (err) {
+      console.error(err);
+      setAccidentError(err instanceof Error ? err.message : 'Failed to fetch accidents');
+    } finally {
+      setLoadingAccidents(false);
+    }
+  };
+
+  const clearSumo = () => {
+    setConflicts([]);
+    setSelectedConflict(null);
+    setSumoLocation(null);
+    setNetFile(null);
+    setSsmFile(null);
+    setError(null);
+    setTypeFilters(['2', '3', '6', '7', '10', '11']);
+    setRiskFilters(['high', 'moderate', 'low']);
+    setDisplayLimit(500);
+  };
+
+  const clearAccidents = () => {
+    setAccidents([]);
+    setShowAccidents(false);
+    setAccidentError(null);
+  };
+
   const exportToCSV = () => {
     if (filteredConflicts.length === 0) return;
 
     const headers = [
-      "ID", "Time", "Begin", "End", "Ego", "Foe", 
-      "Type", "Type Description", "TTC", "DRAC", "PET", 
+      "ID", "Time", "Begin", "End", "Ego", "Foe",
+      "Type", "Type Description", "TTC", "DRAC", "PET",
       "Latitude", "Longitude", "InternalX", "InternalY"
     ];
 
     const rows = filteredConflicts.map(c => {
       const type = c.minTTC?.type || "";
       const typeDesc = type && CONFLICT_DESCRIPTIONS[type] ? CONFLICT_DESCRIPTIONS[type].label : "";
-      
+
       return [
         c.id,
         c.minTTC?.time || "",
@@ -484,9 +608,8 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen bg-[#0F172A] text-slate-200 font-sans overflow-hidden">
-      {/* Sidebar */}
       <div className="w-80 flex-shrink-0 bg-[#1E293B] border-r border-slate-700 flex flex-col shadow-2xl z-50 h-full">
-        <div className="p-4 border-b border-slate-700">
+        <div className="relative p-4 border-b border-slate-700">
           <h1 className="text-lg font-bold flex items-center gap-2 text-white">
             <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
             SUMO Risk Insight
@@ -494,19 +617,25 @@ export default function App() {
           <p className="text-[10px] text-slate-500 mt-0.5 font-mono uppercase tracking-widest">
             v2.4.1 // SSMLog Analyzer
           </p>
+          <button
+            onClick={() => setHelpOpen(true)}
+            className="absolute top-3 right-3 w-7 h-7 flex items-center justify-center rounded-full bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white transition-all"
+            title="คู่มือการใช้งาน"
+          >
+            ?
+          </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-3 space-y-4 custom-scrollbar">
-          {/* File Upload Section */}
           <div className="space-y-3">
             <h2 className="text-[10px] uppercase tracking-widest font-black text-slate-500 flex items-center gap-2">
               <Upload size={12} /> Simulation Assets
             </h2>
-            
+
             <div className="space-y-2">
               <label className="block">
                 <div className={`relative group border border-dashed rounded-lg p-2.5 transition-all ${netFile ? 'border-emerald-500/50 bg-emerald-500/5' : 'border-slate-700 hover:border-slate-600 bg-slate-900/30'}`}>
-                  <input type="file" accept=".xml" onChange={(e) => handleFileUpload(e, 'net')} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                  <input type="file" accept=".xml,.xml.gz" onChange={(e) => handleFileUpload(e, 'net')} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
                   <div className="flex items-center gap-3">
                     <div className={`p-1.5 rounded-md ${netFile ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-500'}`}>
                       <MapIcon size={16} />
@@ -540,7 +669,17 @@ export default function App() {
                 </div>
               </label>
 
-              <button 
+              {conflicts.length > 0 && (
+                <button
+                  onClick={clearSumo}
+                  className="w-full py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-[10px] font-bold transition-all flex items-center justify-center gap-1.5 uppercase tracking-widest"
+                >
+                  <X size={12} />
+                  Clear SUMO Data
+                </button>
+              )}
+
+              <button
                 onClick={processFiles}
                 disabled={!netFile || !ssmFile || isLoading}
                 className="w-full py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-600 text-white rounded-lg text-[11px] font-black transition-all shadow-lg active:scale-[0.98] flex items-center justify-center gap-2 uppercase tracking-widest"
@@ -556,6 +695,157 @@ export default function App() {
               </button>
             </div>
           </div>
+
+          <div className="space-y-3 pt-4 border-t border-slate-700/50">
+            <h2 className="text-[10px] uppercase tracking-widest font-black text-slate-500 flex items-center gap-2">
+              <AlertTriangle size={12} /> Real Accident Data (iTIC)
+            </h2>
+
+            <div className="space-y-2">
+              <div className="relative">
+                <input
+                  type="text"
+                  placeholder="ค้นหาจังหวัด..."
+                  value={provinceSearch}
+                  onChange={(e) => setProvinceSearch(e.target.value)}
+                  className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-200 placeholder-slate-600 outline-none focus:border-blue-500"
+                />
+              </div>
+              <select
+                value={selectedProvince ?? ''}
+                onChange={(e) => setSelectedProvince(e.target.value ? Number(e.target.value) : null)}
+                className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-200 outline-none focus:border-blue-500"
+              >
+                <option value="">-- เลือกจังหวัด --</option>
+                {filteredProvinces.map(p => (
+                  <option key={p.code} value={p.code}>
+                    {p.nameTH} ({p.nameEN})
+                  </option>
+                ))}
+              </select>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[8px] text-slate-500 uppercase font-bold">จากวันที่</label>
+                  <input
+                    type="date"
+                    value={startDate}
+                    min="2023-01-01"
+                    max="2025-12-31"
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-[8px] text-slate-500 uppercase font-bold">ถึงวันที่</label>
+                  <input
+                    type="date"
+                    value={endDate}
+                    min="2023-01-01"
+                    max="2025-12-31"
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[8px] text-slate-500 uppercase font-bold">ความรุนแรง</label>
+                <select
+                  value={severityId}
+                  onChange={(e) => setSeverityId(Number(e.target.value))}
+                  className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-200 outline-none focus:border-blue-500"
+                >
+                  <option value={1}>ทั้งหมด</option>
+                  <option value={2}>เสียชีวิต</option>
+                  <option value={3}>บาดเจ็บ</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[8px] text-slate-500 uppercase font-bold">จำนวนข้อมูลต่อครั้ง</label>
+                <select
+                  value={accidentLimit}
+                  onChange={(e) => setAccidentLimit(Number(e.target.value))}
+                  className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-200 outline-none focus:border-blue-500"
+                >
+                  <option value={1000}>1,000</option>
+                  <option value={5000}>5,000</option>
+                  <option value={10000}>10,000</option>
+                  <option value={20000}>20,000</option>
+                  <option value={50000}>50,000</option>
+                </select>
+              </div>
+
+              <button
+                onClick={() => fetchAccidents(0, false)}
+                disabled={loadingAccidents || !selectedProvince}
+                className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:bg-slate-800 disabled:text-slate-600 text-white rounded-lg text-[11px] font-black transition-all shadow-lg active:scale-[0.98] flex items-center justify-center gap-2 uppercase tracking-widest"
+              >
+                {loadingAccidents ? (
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <>
+                    Load Accidents
+                    <Download size={14} />
+                  </>
+                )}
+              </button>
+
+              {accidentError && (
+                <p className="text-[10px] text-red-400">{accidentError}</p>
+              )}
+
+              {accidents.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between bg-purple-500/10 border border-purple-500/30 rounded-lg px-2.5 py-2">
+                    <span className="text-[10px] font-bold text-purple-300">
+                      แสดง {accidents.length.toLocaleString()} จาก {accidentTotal.toLocaleString()} รายการ
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => setAccidentViewMode(v => v === 'points' ? 'heat' : 'points')}
+                        className="text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded border bg-slate-700 border-slate-600 text-slate-300 hover:bg-slate-600 transition-all"
+                        title="สลับโหมดแสดงผล"
+                      >
+                        {accidentViewMode === 'points' ? 'Heat' : 'Points'}
+                      </button>
+                      <button
+                        onClick={() => setShowAccidents(v => !v)}
+                        className={`text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded border transition-all ${
+                          showAccidents
+                            ? 'bg-purple-500/20 border-purple-500/50 text-purple-300'
+                            : 'bg-slate-800 border-slate-700 text-slate-500'
+                        }`}
+                      >
+                        {showAccidents ? 'ON' : 'OFF'}
+                      </button>
+                      <button
+                        onClick={clearAccidents}
+                        className="text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded border bg-red-500/10 border-red-500/30 text-red-400 hover:bg-red-500/20 transition-all"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                  {accidents.length < accidentTotal && (
+                    <button
+                      onClick={() => fetchAccidents(accidents.length, true)}
+                      disabled={loadingAccidents}
+                      className="w-full py-1.5 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:text-slate-600 text-slate-300 rounded-lg text-[10px] font-bold transition-all flex items-center justify-center gap-1.5 uppercase tracking-widest"
+                    >
+                      {loadingAccidents ? (
+                        <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      ) : (
+                        <>Load More ({(accidentTotal - accidents.length).toLocaleString()} เหลือ)</>
+                      )}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
           {conflicts.length > 0 && (
             <div className="space-y-4 pt-4 border-t border-slate-700/50">
               <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-3">
@@ -577,7 +867,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Filters Section */}
               <div className="space-y-4 pt-2">
                 <div className="space-y-3">
                   <h2 className="text-[10px] uppercase tracking-widest font-black text-slate-500 flex items-center gap-2">
@@ -589,8 +878,8 @@ export default function App() {
                         key={id}
                         onClick={() => setTypeFilters(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])}
                         className={`text-[9px] font-bold p-2 rounded-lg border transition-all text-left flex flex-col gap-1 ${
-                          typeFilters.includes(id) 
-                            ? 'bg-blue-600 border-blue-500 text-white shadow-lg' 
+                          typeFilters.includes(id)
+                            ? 'bg-blue-600 border-blue-500 text-white shadow-lg'
                             : 'bg-slate-800 border-slate-700 text-slate-500'
                         }`}
                       >
@@ -648,7 +937,7 @@ export default function App() {
 
               <div className="flex justify-between items-center">
                 <h2 className="text-[10px] uppercase font-black text-slate-500 tracking-widest">Registry Feed ({filteredConflicts.length})</h2>
-                <button 
+                <button
                   onClick={exportToCSV}
                   className="flex items-center gap-1.5 px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded text-[9px] font-black uppercase tracking-widest transition-all border border-slate-700"
                   title="Export Filtered Conflict Data to CSV"
@@ -661,12 +950,12 @@ export default function App() {
               <div className="flex-1 min-h-0 flex flex-col border border-slate-700/50 rounded-xl bg-slate-900/30 overflow-hidden" style={{ maxHeight: 'calc(100vh - 420px)' }}>
                 <div className="overflow-y-auto p-2 space-y-1 custom-scrollbar">
                   {filteredConflicts.slice(0, 50).map((c) => (
-                    <button 
+                    <button
                       key={c.id}
                       onClick={() => setSelectedConflict(c)}
                       className={`w-full p-2.5 rounded-lg text-left transition-all border ${
-                        selectedConflict?.id === c.id 
-                          ? 'bg-blue-500/20 border-blue-500/50 shadow-inner' 
+                        selectedConflict?.id === c.id
+                          ? 'bg-blue-500/20 border-blue-500/50 shadow-inner'
                           : 'bg-slate-800/40 border-slate-700 hover:bg-slate-800'
                       }`}
                     >
@@ -709,17 +998,15 @@ export default function App() {
         </div>
       </div>
 
-      {/* Main Content (Map) */}
       <div className="flex-1 relative bg-[#0B0F1A]">
-        {/* Map Style Toggle */}
         <div className="absolute top-6 left-1/2 -translate-x-1/2 z-[1000] flex gap-1 bg-slate-900/80 backdrop-blur-md p-1 rounded-lg border border-slate-700 shadow-2xl">
           {(Object.keys(MAP_STYLES) as MapStyleKey[]).map((style) => (
             <button
               key={style}
               onClick={() => setMapStyle(style)}
               className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase tracking-widest transition-all whitespace-nowrap ${
-                mapStyle === style 
-                  ? 'bg-blue-600 text-white shadow-lg' 
+                mapStyle === style
+                  ? 'bg-blue-600 text-white shadow-lg'
                   : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800'
               }`}
             >
@@ -728,11 +1015,12 @@ export default function App() {
           ))}
         </div>
 
-        <MapContainer 
-          center={[13.75, 100.5]} 
-          zoom={10} 
+        <MapContainer
+          center={[13.75, 100.5]}
+          zoom={10}
           className="h-full w-full outline-none"
           scrollWheelZoom={true}
+          preferCanvas={true}
         >
           <MapResizeHandler />
           <TileLayer
@@ -740,9 +1028,7 @@ export default function App() {
             attribution={MAP_STYLES[mapStyle].attribution}
             url={MAP_STYLES[mapStyle].url}
           />
-          
-          {/* MapEvents removed */}
-          
+
           <MapRecenter bounds={mapBounds} />
 
           {filteredConflicts.slice(0, displayLimit).map((c) => {
@@ -766,12 +1052,16 @@ export default function App() {
               />
             );
           })}
+
+          {showAccidents && accidentViewMode === 'points' && <AccidentLayer accidents={accidents} />}
+          {showAccidents && accidentViewMode === 'heat' && (
+            <HeatLayer accidents={accidents} />
+          )}
         </MapContainer>
 
-        {/* Floating Details Overlay */}
         <AnimatePresence>
           {selectedConflict && (
-            <motion.div 
+            <motion.div
               initial={{ x: 20, opacity: 0 }}
               animate={{ x: 0, opacity: 1 }}
               exit={{ x: 20, opacity: 0 }}
@@ -784,7 +1074,7 @@ export default function App() {
                     Conflict Scan
                   </h3>
                 </div>
-                <button 
+                <button
                   onClick={() => setSelectedConflict(null)}
                   className="p-1.5 hover:bg-slate-800 rounded-lg transition-colors text-slate-400 group"
                 >
@@ -819,7 +1109,7 @@ export default function App() {
                         <span className="text-[7px] font-mono p-1 bg-slate-800 text-slate-500 rounded border border-slate-700">CODE_{selectedConflict.minTTC.type}</span>
                       </div>
                       <p className="text-[9px] text-slate-300 leading-tight mb-2 italic">"{CONFLICT_DESCRIPTIONS[selectedConflict.minTTC.type].desc}"</p>
-                      
+
                       <div className="pt-2 border-t border-slate-800">
                          <ConflictVisualization conflict={selectedConflict} />
                       </div>
@@ -897,7 +1187,7 @@ export default function App() {
                         <span>Y: {selectedConflict.minTTC?.position[1].toFixed(2)}</span>
                       </div>
                     </div>
-                    
+
                     <div className="bg-blue-500/5 p-2 rounded-lg border border-blue-500/20">
                       <div className="flex justify-between text-[9px] mb-1">
                         <span className="text-blue-500 uppercase font-black">Geodetic (GPS)</span>
@@ -936,7 +1226,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Legend Footer */}
         <div className="absolute bottom-8 left-8 flex items-center gap-6 bg-[#0F172A]/90 backdrop-blur-md px-6 py-3 rounded-full border border-slate-700 shadow-2xl z-[500]">
           <div className="flex items-center gap-2">
             <span className="w-3 h-3 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]"></span>
@@ -950,8 +1239,18 @@ export default function App() {
             <span className="w-3 h-3 rounded-full bg-slate-500"></span>
             <span className="text-[11px] font-bold text-slate-500">Low Risk ({">"} 3.0s)</span>
           </div>
+          <div className="flex items-center gap-2">
+            <span className="w-3 h-3 rounded-full bg-purple-600 shadow-[0_0_8px_rgba(124,58,237,0.5)]"></span>
+            <span className="text-[11px] font-bold text-slate-300">เสียชีวิต (iTIC)</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-3 h-3 rounded-full bg-sky-500 shadow-[0_0_8px_rgba(14,165,233,0.5)]"></span>
+            <span className="text-[11px] font-bold text-slate-300">บาดเจ็บ (iTIC)</span>
+          </div>
         </div>
       </div>
+
+      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
 
       <style>{`
         .custom-scrollbar::-webkit-scrollbar {
